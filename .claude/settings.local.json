@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check seeds/products.js)",
+      "Bash(node --check /home/pragati/Desktop/code/fisto-up-backend/src/routes/orders.js)",
+      "Bash(node --check /home/pragati/Desktop/code/fisto-up-backend/src/routes/payment.js)",
+      "Bash(node --check /home/pragati/Desktop/code/fisto-up-backend/src/config/razorpay.js)"
+    ]
+  }
+}
