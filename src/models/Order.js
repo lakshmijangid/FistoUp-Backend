@@ -24,9 +24,10 @@ const orderSchema = new mongoose.Schema(
     tax: { type: Number, default: 0 },
     status: {
       type: String,
-      enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered'],
+      enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'returned'],
       default: 'pending',
     },
+    isBulkOrder: { type: Boolean, default: false },
     paymentMethod: { type: String, enum: ['cod', 'upi'], required: true },
     paymentStatus: { type: String, enum: ['pending', 'paid'], default: 'pending' },
     razorpayOrderId: { type: String },

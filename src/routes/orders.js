@@ -3,7 +3,28 @@ const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
+const Deal = require('../models/Deal');
+const AdminNotification = require('../models/AdminNotification');
 const { protect } = require('../middleware/auth');
+
+// The price to charge for a product: an active deal price visible to this buyer,
+// else the catalogue price.
+async function effectivePrice(product, buyerId) {
+  const now = new Date();
+  const deal = await Deal.findOne({
+    product: product._id,
+    status: 'accepted',
+    $or: [{ kind: 'public' }, { kind: 'targeted', targetUsers: buyerId }],
+    $and: [
+      { $or: [{ startsAt: null }, { startsAt: { $lte: now } }] },
+      { $or: [{ endsAt: null }, { endsAt: { $gte: now } }] },
+    ],
+  });
+  if (deal && deal.dealPrice != null && deal.dealPrice < product.price) {
+    return deal.dealPrice;
+  }
+  return product.price;
+}
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -14,7 +35,6 @@ const SHIPPING_THRESHOLD = 500;
 const SHIPPING_FEE = 50;
 const TAX_RATE = 0.05;
 
-// POST /api/orders/create
 router.post('/create', protect, async (req, res) => {
   try {
     const { items, shippingAddress, paymentMethod } = req.body;
@@ -36,15 +56,15 @@ router.post('/create', protect, async (req, res) => {
       if (product.stock < item.quantity) {
         return res.status(400).json({ message: `Insufficient stock for ${product.name}` });
       }
-      subtotal += product.price * item.quantity;
-      resolvedItems.push({ product: item.product, quantity: item.quantity, price: product.price });
+      const price = await effectivePrice(product, req.user._id);
+      subtotal += price * item.quantity;
+      resolvedItems.push({ product: item.product, quantity: item.quantity, price });
     }
 
     const tax = parseFloat((subtotal * TAX_RATE).toFixed(2));
     const shippingCharge = subtotal >= SHIPPING_THRESHOLD ? 0 : SHIPPING_FEE;
     const totalAmount = parseFloat((subtotal + tax + shippingCharge).toFixed(2));
 
-    // Deduct stock atomically per product
     for (const item of resolvedItems) {
       await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.quantity } });
     }
@@ -60,9 +80,20 @@ router.post('/create', protect, async (req, res) => {
       status: paymentMethod === 'cod' ? 'confirmed' : 'pending',
     });
 
+    try {
+      await AdminNotification.create({
+        type: 'new_order',
+        title: 'New order placed',
+        message: `Order ${order.orderNumber} — ${resolvedItems.length} item(s) for ₹${totalAmount}`,
+        metadata: { orderId: order._id, orderNumber: order.orderNumber },
+      });
+    } catch (e) {
+      console.error('Admin notification error:', e.message);
+    }
+
     if (paymentMethod === 'upi') {
       const razorpayOrder = await razorpay.orders.create({
-        amount: Math.round(totalAmount * 100), // paise
+        amount: Math.round(totalAmount * 100),
         currency: 'INR',
         receipt: order.orderNumber,
       });
@@ -79,7 +110,6 @@ router.post('/create', protect, async (req, res) => {
   }
 });
 
-// POST /api/orders/verify-payment
 router.post('/verify-payment', protect, async (req, res) => {
   try {
     const { razorpayOrderId, razorpayPaymentId, razorpaySignature, orderId } = req.body;
@@ -110,7 +140,6 @@ router.post('/verify-payment', protect, async (req, res) => {
   }
 });
 
-// GET /api/orders/my-orders  — must be before /:orderNumber
 router.get('/my-orders', protect, async (req, res) => {
   try {
     const orders = await Order.find({ buyer: req.user._id })
@@ -122,7 +151,6 @@ router.get('/my-orders', protect, async (req, res) => {
   }
 });
 
-// GET /api/orders/:orderNumber
 router.get('/:orderNumber', protect, async (req, res) => {
   try {
     const order = await Order.findOne({ orderNumber: req.params.orderNumber }).populate(
