@@ -1,12 +1,12 @@
 const router = require('express').Router();
 const jwt = require('jsonwebtoken');
 const Product = require('../models/Product');
+const Order = require('../models/Order');
 const Deal = require('../models/Deal');
 const Sale = require('../models/Sale');
 const { protect, requireRole } = require('../middleware/auth');
 
-// Best-effort: decode the bearer token if present, else continue as a guest.
-// Lets /deals include offers targeted at the signed-in buyer without forcing auth.
+
 function optionalUser(req) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) return null;
@@ -17,7 +17,7 @@ function optionalUser(req) {
   }
 }
 
-// Shape a live deal into a product card payload for the buyer apps.
+
 function dealToCard(deal) {
   const p = deal.product;
   if (!p) return null;
@@ -25,7 +25,7 @@ function dealToCard(deal) {
   return { ...obj, dealPrice: deal.dealPrice, dealEndsAt: deal.endsAt };
 }
 
-// GET /api/products/deals — live Deal-of-the-Day + offers targeted at the caller
+
 router.get('/deals', async (req, res) => {
   try {
     const userId = optionalUser(req);
@@ -42,7 +42,7 @@ router.get('/deals', async (req, res) => {
   }
 });
 
-// GET /api/products/sales — live sales, each with their accepted in-window products
+
 router.get('/sales', async (req, res) => {
   try {
     const now = new Date();
@@ -70,14 +70,14 @@ router.get('/sales', async (req, res) => {
       }),
     );
 
-    // Only return sales that actually have live products.
+    
     res.json({ sales: result.filter((s) => s.products.length > 0) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// GET /api/products/categories  — must be before /:id
+
 router.get('/categories', async (req, res) => {
   try {
     const counts = await Product.aggregate([
@@ -92,7 +92,7 @@ router.get('/categories', async (req, res) => {
   }
 });
 
-// GET /api/products
+
 router.get('/', async (req, res) => {
   try {
     const { category, search, page = 1, limit = 20 } = req.query;
@@ -126,7 +126,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/products/search?q=&category=&pinCode=&minPrice=&maxPrice=&page=&limit=
+
 router.get('/search', async (req, res) => {
   try {
     const { q, category, pinCode, minPrice, maxPrice, page = 1, limit = 20 } = req.query;
@@ -174,7 +174,7 @@ router.get('/search', async (req, res) => {
   }
 });
 
-// GET /api/products/:id
+
 router.get('/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -187,7 +187,65 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/products  — admin only
+
+router.get('/:id/can-review', protect, async (req, res) => {
+  try {
+    const bought = await Order.exists({ buyer: req.user._id, 'items.product': req.params.id });
+    const product = await Product.findById(req.params.id).select('reviews');
+    const hasReviewed = !!product?.reviews?.some((rv) => String(rv.user) === String(req.user._id));
+    res.json({ canReview: !!bought, hasReviewed });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.post('/:id/reviews', protect, async (req, res) => {
+  try {
+    const rating = Number(req.body.rating);
+    const comment = (req.body.comment || '').trim();
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: 'A rating between 1 and 5 is required' });
+    }
+
+    const product = await Product.findById(req.params.id);
+    if (!product || !product.isActive) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+
+   
+    const bought = await Order.exists({ buyer: req.user._id, 'items.product': product._id });
+    if (!bought) {
+      return res.status(403).json({
+        code: 'NOT_PURCHASED',
+        message: 'You can review a product only after buying it.',
+      });
+    }
+
+    
+    const existing = product.reviews.find((rv) => String(rv.user) === String(req.user._id));
+    if (existing) {
+      existing.rating = rating;
+      existing.comment = comment;
+      existing.name = req.user.name || existing.name;
+      existing.createdAt = new Date();
+    } else {
+      product.reviews.push({
+        user: req.user._id,
+        name: req.user.name || 'Customer',
+        rating,
+        comment,
+      });
+    }
+
+    await product.save();
+    res.status(201).json({ reviews: product.reviews });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
 router.post('/', protect, requireRole('admin'), async (req, res) => {
   try {
     const { name, price, category, stock } = req.body;
@@ -201,7 +259,7 @@ router.post('/', protect, requireRole('admin'), async (req, res) => {
   }
 });
 
-// PUT /api/products/:id  — admin only
+
 router.put('/:id', protect, requireRole('admin'), async (req, res) => {
   try {
     const product = await Product.findByIdAndUpdate(req.params.id, req.body, {

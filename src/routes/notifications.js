@@ -2,7 +2,7 @@ const router = require('express').Router();
 const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 
-// GET /api/notifications  — current user's notifications, newest first
+
 router.get('/', protect, async (req, res) => {
   try {
     const notifications = await Notification.find({ user: req.user._id })
@@ -15,7 +15,7 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
-// PATCH /api/notifications/:id/read  — mark one as read
+
 router.patch('/:id/read', protect, async (req, res) => {
   try {
     const n = await Notification.findOneAndUpdate(
@@ -30,7 +30,7 @@ router.patch('/:id/read', protect, async (req, res) => {
   }
 });
 
-// PATCH /api/notifications/read-all  — mark everything read
+
 router.patch('/read-all', protect, async (req, res) => {
   try {
     await Notification.updateMany(
@@ -43,7 +43,7 @@ router.patch('/read-all', protect, async (req, res) => {
   }
 });
 
-// DELETE /api/notifications/:id
+
 router.delete('/:id', protect, async (req, res) => {
   try {
     const n = await Notification.findOneAndDelete({ _id: req.params.id, user: req.user._id });

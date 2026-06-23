@@ -2,7 +2,7 @@ const router = require('express').Router();
 const PaymentMethod = require('../models/PaymentMethod');
 const { protect } = require('../middleware/auth');
 
-// Ensure exactly one default among the user's methods.
+
 async function applyDefault(userId, makeDefaultId) {
   if (makeDefaultId) {
     await PaymentMethod.updateMany({ user: userId }, { isDefault: false });
@@ -19,7 +19,7 @@ async function applyDefault(userId, makeDefaultId) {
   }
 }
 
-// GET /api/payment-methods
+
 router.get('/', protect, async (req, res) => {
   try {
     const methods = await PaymentMethod.find({ user: req.user._id }).sort({ createdAt: -1 });
@@ -29,7 +29,7 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
-// POST /api/payment-methods
+
 router.post('/', protect, async (req, res) => {
   try {
     const { type, brand, last4, holderName, expiry, upiId, isDefault } = req.body;
@@ -51,7 +51,7 @@ router.post('/', protect, async (req, res) => {
   }
 });
 
-// PATCH /api/payment-methods/:id/default
+
 router.patch('/:id/default', protect, async (req, res) => {
   try {
     const method = await PaymentMethod.findOne({ _id: req.params.id, user: req.user._id });
@@ -63,7 +63,7 @@ router.patch('/:id/default', protect, async (req, res) => {
   }
 });
 
-// DELETE /api/payment-methods/:id
+
 router.delete('/:id', protect, async (req, res) => {
   try {
     const method = await PaymentMethod.findOneAndDelete({

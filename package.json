@@ -16,6 +16,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.4.0",
     "razorpay": "^2.9.2",
+    "resend": "^6.14.0",
     "twilio": "^5.2.2"
   },
   "devDependencies": {

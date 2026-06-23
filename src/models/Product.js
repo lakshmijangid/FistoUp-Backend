@@ -2,8 +2,8 @@ const mongoose = require('mongoose');
 
 const productSchema = new mongoose.Schema(
   {
-    // The seller (User with role 'seller'/'admin') who owns this listing.
-    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+    // The seller who owns this listing (lives in the `sellers` collection).
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', index: true },
     name: { type: String, required: true, trim: true },
     sku: { type: String, trim: true, index: true },
     description: { type: String },
@@ -13,6 +13,9 @@ const productSchema = new mongoose.Schema(
     // categories (Electronics, Sports, Audio, …) are accepted.
     category: { type: String, required: true, trim: true },
     images: [{ type: String }],
+    // Optional seller-defined sizes (free-form names, any count). Empty = the
+    // product has no sizes.
+    sizes: { type: [String], default: [] },
     stock: { type: Number, default: 0, min: 0 },
     // Target / max capacity — used by the seller inventory bar (units / maxUnits).
     maxStock: { type: Number, default: 0, min: 0 },
@@ -28,6 +31,7 @@ const productSchema = new mongoose.Schema(
     reviews: [
       {
         user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        name: { type: String }, // denormalised reviewer name for display
         rating: { type: Number, min: 1, max: 5 },
         comment: { type: String },
         createdAt: { type: Date, default: Date.now },

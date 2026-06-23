@@ -2,7 +2,6 @@ const router = require('express').Router();
 const Product = require('../models/Product');
 const Order = require('../models/Order');
 const BulkInquiry = require('../models/BulkInquiry');
-const Seller = require('../models/Seller');
 const Deal = require('../models/Deal');
 const Notification = require('../models/Notification');
 const cloudinary = require('../config/cloudinary');
@@ -76,11 +75,11 @@ router.post('/products', sellerOnly, async (req, res) => {
       return res.status(400).json({ message: 'name, price and category are required' });
     }
 
-    const sellerProfile = await Seller.findOne({ user: req.user._id }).select('name');
+
     const product = await Product.create({
       ...req.body,
       owner: req.user._id,
-      producerName: req.body.producerName || sellerProfile?.name || req.user.name,
+      producerName: req.body.producerName || req.user.name || req.user.ownerName,
     });
 
     res.status(201).json({ product });
@@ -294,14 +293,14 @@ router.get('/inquiries', sellerOnly, async (req, res) => {
   }
 });
 
-/* ─────────────────────── Deals (promotion invites) ─────────────────────── */
 
-// GET /api/seller/deals?status=
+
+
 router.get('/deals', sellerOnly, async (req, res) => {
   try {
     const { status } = req.query;
 
-    // Lazily expire past-window deals owned by this seller.
+ 
     await Deal.updateMany(
       {
         seller: req.user._id,
@@ -324,7 +323,7 @@ router.get('/deals', sellerOnly, async (req, res) => {
   }
 });
 
-// PATCH /api/seller/deals/:id/accept  { dealPrice }
+
 router.patch('/deals/:id/accept', sellerOnly, async (req, res) => {
   try {
     const { dealPrice } = req.body;
@@ -352,7 +351,7 @@ router.patch('/deals/:id/accept', sellerOnly, async (req, res) => {
     deal.status = 'accepted';
     await deal.save();
 
-    // Targeted offers: tell the chosen buyers it's live.
+   
     if (deal.kind === 'targeted' && deal.targetUsers?.length) {
       await Notification.insertMany(
         deal.targetUsers.map((u) => ({
@@ -370,7 +369,7 @@ router.patch('/deals/:id/accept', sellerOnly, async (req, res) => {
   }
 });
 
-// PATCH /api/seller/deals/:id/decline
+
 router.patch('/deals/:id/decline', sellerOnly, async (req, res) => {
   try {
     const deal = await Deal.findOneAndUpdate(

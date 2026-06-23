@@ -2,45 +2,94 @@ const router = require('express').Router();
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 const User = require('../models/User');
-const Seller = require('../models/Seller');
+const Admin = require('../models/Admin');
 const AdminNotification = require('../models/AdminNotification');
-const { protect } = require('../middleware/auth');
+const { sendVerificationEmail } = require('../config/resend');
+const { normalizePhone } = require('../utils/phone');
+const { protect, modelForRole } = require('../middleware/auth');
 
 const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
 
-// In-memory OTP cache: phone -> { otp, expiresAt }
+
 const otpCache = new Map();
 
-const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_TTL_MS = 5 * 60 * 1000;
 
-const signToken = (id) =>
-  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-// Shape the Seller doc into the `business` object the client expects.
-function businessShape(seller) {
-  if (!seller) return undefined;
+const emailOtpCache = new Map();
+
+const EMAIL_OTP_TTL_MS = 10 * 60 * 1000; 
+
+const signToken = (id, role) =>
+  jwt.sign({ id, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+
+function businessShape(account) {
+  if (!account || account.role !== 'seller') return undefined;
   return {
-    name: seller.name,
-    type: seller.type,
-    category: seller.category,
-    gstin: seller.gstin,
-    fssaiLicense: seller.fssaiLicense,
-    address: seller.address,
-    phone: seller.phone,
-    description: seller.description,
-    bank: seller.bank,
+    name: account.name, 
+    type: account.type,
+    category: account.category,
+    gstin: account.gstin,
+    fssaiLicense: account.fssaiLicense,
+    address: account.address,
+    phone: account.phone,
+    description: account.description,
+    bank: account.bank,
   };
 }
 
-async function getBusiness(userId) {
-  return businessShape(await Seller.findOne({ user: userId }));
+
+function accountShape(account) {
+  return {
+    id: account._id,
+    name: account.role === 'seller' ? account.ownerName : account.name,
+    email: account.email,
+    emailVerified: account.emailVerified,
+    phone: account.phone,
+    role: account.role,
+
+    isVerified: account.isVerified,
+    addresses: account.addresses,
+    business: businessShape(account),
+  };
 }
 
-// POST /api/auth/send-otp
+
 router.post('/send-otp', async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { role, mode = 'login' } = req.body;
+    const phone = normalizePhone(req.body.phone);
     if (!phone) return res.status(400).json({ message: 'Phone is required' });
+
+    const resolvedRole = role === 'seller' ? 'seller' : 'buyer';
+    const Model = modelForRole(resolvedRole);
+
+    if (mode === 'login') {
+      const account = await Model.findOne({ phone });
+      if (!account) {
+        return res.status(404).json({ code: 'NO_ACCOUNT', message: 'No account found. Please sign up.' });
+      }
+     
+      if (account.isBanned) {
+        return res.status(403).json({
+          code: 'BANNED',
+          message: 'This account has been banned. Please contact support.',
+        });
+      }
+     
+      if (resolvedRole === 'seller' && !account.isVerified) {
+        return res.status(403).json({
+          code: 'PENDING_APPROVAL',
+          message: 'Your account is pending admin approval. Please try again later.',
+        });
+      }
+    } else if (mode === 'signup') {
+      const existing = await Model.findOne({ phone });
+      if (existing) {
+        return res.status(409).json({ code: 'ACCOUNT_EXISTS', message: 'An account already exists. Please log in.' });
+      }
+    }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     otpCache.set(phone, { otp, expiresAt: Date.now() + OTP_TTL_MS });
@@ -54,15 +103,15 @@ router.post('/send-otp', async (req, res) => {
       });
       delivered = true;
     } catch (smsErr) {
-      // Twilio not configured / number unverified — fall back to dev mode below.
+      
       console.warn(`OTP SMS failed (${smsErr.message}); falling back to dev mode`);
     }
+
 
     const devMode = !delivered || process.env.NODE_ENV !== 'production';
     res.json({
       success: true,
       message: delivered ? 'OTP sent' : 'OTP generated (dev mode)',
-      // In dev the OTP is returned so the flow is testable without SMS.
       ...(devMode ? { devOtp: otp } : {}),
     });
   } catch (err) {
@@ -70,12 +119,11 @@ router.post('/send-otp', async (req, res) => {
   }
 });
 
-// POST /api/auth/verify-otp  { phone, otp, role?, mode? }
-//   mode 'login'  (default): requires an existing account, else 404.
-//   mode 'signup'          : creates the account if it doesn't exist.
+
 router.post('/verify-otp', async (req, res) => {
   try {
-    const { phone, otp, role, mode = 'login' } = req.body;
+    const { otp, role, mode = 'login' } = req.body;
+    const phone = normalizePhone(req.body.phone);
     if (!phone || !otp) return res.status(400).json({ message: 'Phone and OTP are required' });
 
     const cached = otpCache.get(phone);
@@ -85,13 +133,14 @@ router.post('/verify-otp', async (req, res) => {
 
     otpCache.delete(phone);
 
-    // Only buyer/seller may be self-assigned; 'admin' is never granted via signup.
-    const requestedRole = role === 'seller' ? 'seller' : undefined;
 
-    let user = await User.findOne({ phone });
+    const resolvedRole = role === 'seller' ? 'seller' : 'buyer';
+    const Model = modelForRole(resolvedRole);
+
+    let account = await Model.findOne({ phone });
     let isNew = false;
-    if (!user) {
-      // Login attempt for a phone with no account — tell the client to sign up.
+    if (!account) {
+
       if (mode === 'login') {
         return res.status(404).json({
           code: 'NO_ACCOUNT',
@@ -99,175 +148,197 @@ router.post('/verify-otp', async (req, res) => {
         });
       }
       isNew = true;
-      user = await User.create({
-        name: '',
-        phone,
-        role: requestedRole || 'buyer',
-      });
-    } else {
-      if (requestedRole === 'seller' && user.role === 'buyer') user.role = 'seller';
-      await user.save();
+      account = await Model.create(
+        resolvedRole === 'seller' ? { phone, ownerName: '' } : { phone, name: '' }
+      );
     }
 
     res.json({
-      token: signToken(user._id),
+      token: signToken(account._id, account.role),
       isNew,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        addresses: user.addresses,
-        business: await getBusiness(user._id),
-      },
+      user: accountShape(account),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// POST /api/auth/update-profile  — name, email and the seller business profile.
-// The business profile lives in the dedicated `Seller` collection (1:1 with the
-// user) and is deep-merged so a form that only touches some fields (e.g. just
-// bank details) doesn't wipe the others (type, category, fssaiLicense, …).
+
 router.post('/update-profile', protect, async (req, res) => {
   try {
     const { name, email, business } = req.body;
-    const user = await User.findById(req.user._id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
+    const Model = modelForRole(req.user.role);
+    const account = await Model.findById(req.user._id);
+    if (!account) return res.status(404).json({ message: 'Account not found' });
 
-    if (name !== undefined) user.name = name;
-    if (email !== undefined) user.email = email;
-    await user.save();
+    if (email !== undefined) {
+      
+      if (account.email !== email) account.emailVerified = false;
+      account.email = email;
+    }
+    if (name !== undefined) {
 
-    if (business && typeof business === 'object') {
-      // Upsert the seller profile and merge into it.
-      let seller = await Seller.findOne({ user: user._id });
-      if (!seller) seller = new Seller({ user: user._id });
+      if (account.role === 'seller') account.ownerName = name;
+      else account.name = name;
+    }
 
+
+    if (account.role === 'seller' && business && typeof business === 'object') {
       const { bank, ...rest } = business;
       for (const [key, val] of Object.entries(rest)) {
-        if (val !== undefined) seller[key] = val;
+        if (val !== undefined) account[key] = val;
       }
       if (bank && typeof bank === 'object') {
-        const currentBank = seller.bank
-          ? seller.bank.toObject
-            ? seller.bank.toObject()
-            : seller.bank
+        const currentBank = account.bank
+          ? account.bank.toObject
+            ? account.bank.toObject()
+            : account.bank
           : {};
-        seller.bank = { ...currentBank, ...bank };
-      }
-      await seller.save();
-
-      if (seller.name) {
-        try {
-          await AdminNotification.create({
-            type: 'new_seller',
-            title: 'New seller registered',
-            message: `${seller.name} has submitted business details and is awaiting approval.`,
-            metadata: { sellerId: seller._id },
-          });
-        } catch (e) {
-          console.error('Admin notification error:', e.message);
-        }
+        account.bank = { ...currentBank, ...bank };
       }
     }
 
-    res.json({
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        addresses: user.addresses,
-        business: await getBusiness(user._id),
-      },
-    });
+    await account.save();
+
+    if (account.role === 'seller' && business && account.name) {
+      try {
+        await AdminNotification.create({
+          type: 'new_seller',
+          title: 'New seller registered',
+          message: `${account.name} has submitted business details and is awaiting approval.`,
+          metadata: { sellerId: account._id },
+        });
+      } catch (e) {
+        console.error('Admin notification error:', e.message);
+      }
+    }
+
+    res.json({ user: accountShape(account) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// POST /api/auth/login  — password-based login for admin
+
 router.post('/login', async (req, res) => {
   try {
-    const { phone, password } = req.body;
+    const { password } = req.body;
+    const phone = normalizePhone(req.body.phone);
     if (!phone || !password) {
       return res.status(400).json({ message: 'Phone and password are required' });
     }
 
-    const user = await User.findOne({ phone }).select('+password');
-    if (!user) {
+    const account = await Admin.findOne({ phone }).select('+password');
+    if (!account) {
       return res.status(404).json({ message: 'No account found with this phone number' });
     }
 
-    if (!user.password) {
+    if (!account.password) {
       return res.status(400).json({ message: 'This account uses OTP login. Please use the OTP method.' });
     }
 
-    const isMatch = await user.comparePassword(password);
+    const isMatch = await account.comparePassword(password);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
     res.json({
-      token: signToken(user._id),
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        addresses: user.addresses,
-        business: await getBusiness(user._id),
-      },
+      token: signToken(account._id, account.role),
+      user: accountShape(account),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// GET /api/auth/me  — user + their seller business profile
+
 router.get('/me', protect, async (req, res) => {
-  res.json({
-    user: {
-      id: req.user._id,
-      name: req.user.name,
-      email: req.user.email,
-      phone: req.user.phone,
-      role: req.user.role,
-      addresses: req.user.addresses,
-      business: await getBusiness(req.user._id),
-    },
-  });
+  res.json({ user: accountShape(req.user) });
 });
 
-/* ──────────────────────── Shipping addresses ──────────────────────── */
 
-// If the new address is flagged default, clear the flag on the others.
+router.post('/send-email-otp', protect, async (req, res) => {
+  try {
+    const email = String(req.body.email || req.user.email || '').trim();
+    if (!email) return res.status(400).json({ message: 'No email address to verify. Add one first.' });
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    emailOtpCache.set(String(req.user._id), { code, email, expiresAt: Date.now() + EMAIL_OTP_TTL_MS });
+
+    let delivered = false;
+    try {
+      const result = await sendVerificationEmail(email, code);
+      if (result && result.error) throw new Error(result.error.message || 'Email provider error');
+      delivered = true;
+    } catch (mailErr) {
+      console.warn(`Email code send failed (${mailErr.message})`);
+    }
+
+
+    const isProd = process.env.NODE_ENV === 'production';
+    if (isProd && !delivered) {
+      return res.status(502).json({ message: 'Could not send the verification email right now. Please try again.' });
+    }
+
+    res.json({
+      success: true,
+      message: delivered ? 'Verification code sent' : 'Code generated (dev mode)',
+      ...(isProd ? {} : { devCode: code }),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.post('/verify-email', protect, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ message: 'Code is required' });
+
+    const cached = emailOtpCache.get(String(req.user._id));
+    if (!cached || cached.code !== code || Date.now() > cached.expiresAt) {
+      return res.status(400).json({ message: 'Invalid or expired code' });
+    }
+    emailOtpCache.delete(String(req.user._id));
+
+    const Model = modelForRole(req.user.role);
+    const account = await Model.findById(req.user._id);
+    if (!account) return res.status(404).json({ message: 'Account not found' });
+
+
+    if (cached.email) account.email = cached.email;
+    account.emailVerified = true;
+    await account.save();
+
+    res.json({ user: accountShape(account) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
 function applyDefault(user, addr) {
   if (addr && addr.isDefault) {
     user.addresses.forEach((a) => {
       if (a !== addr) a.isDefault = false;
     });
   }
-  // Guarantee at least one default when any address exists.
+
   if (user.addresses.length && !user.addresses.some((a) => a.isDefault)) {
     user.addresses[0].isDefault = true;
   }
 }
 
-// GET /api/auth/addresses
+
 router.get('/addresses', protect, async (req, res) => {
   res.json({ addresses: req.user.addresses || [] });
 });
 
-// POST /api/auth/addresses
+
 router.post('/addresses', protect, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await modelForRole(req.user.role).findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const { label, name, phone, street, city, state, pincode, isDefault } = req.body;
@@ -284,10 +355,10 @@ router.post('/addresses', protect, async (req, res) => {
   }
 });
 
-// PUT /api/auth/addresses/:id
+
 router.put('/addresses/:id', protect, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await modelForRole(req.user.role).findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const addr = user.addresses.id(req.params.id);
@@ -303,10 +374,10 @@ router.put('/addresses/:id', protect, async (req, res) => {
   }
 });
 
-// DELETE /api/auth/addresses/:id
+
 router.delete('/addresses/:id', protect, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await modelForRole(req.user.role).findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const addr = user.addresses.id(req.params.id);

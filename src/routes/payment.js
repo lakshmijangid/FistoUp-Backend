@@ -4,7 +4,7 @@ const razorpay = require('../config/razorpay');
 const Order = require('../models/Order');
 const { protect } = require('../middleware/auth');
 
-// POST /api/payment/create-order
+
 router.post('/create-order', protect, async (req, res) => {
   try {
     const { amount, orderId } = req.body;
@@ -22,7 +22,7 @@ router.post('/create-order', protect, async (req, res) => {
     }
 
     const razorpayOrder = await razorpay.orders.create({
-      amount: Math.round(amount * 100), // rupees → paise
+      amount: Math.round(amount * 100),
       currency: 'INR',
       receipt: order.orderNumber,
     });
@@ -41,7 +41,7 @@ router.post('/create-order', protect, async (req, res) => {
   }
 });
 
-// POST /api/payment/verify
+
 router.post('/verify', protect, async (req, res) => {
   try {
     const { razorpayOrderId, razorpayPaymentId, razorpaySignature, orderId } = req.body;

@@ -10,7 +10,7 @@ const saleSchema = new mongoose.Schema(
     startsAt: { type: Date },
     endsAt: { type: Date },
     isActive: { type: Boolean, default: true },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
   },
   { timestamps: true }
 );

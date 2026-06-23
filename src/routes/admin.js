@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Seller = require('../models/Seller');
+const Admin = require('../models/Admin');
 const Product = require('../models/Product');
 const Banner = require('../models/Banner');
 const Coupon = require('../models/Coupon');
@@ -23,7 +24,48 @@ async function notifyAdmin(type, title, message, metadata = {}) {
   }
 }
 
-// GET /api/admin/dashboard
+
+function sellerView(seller) {
+  const o = seller.toObject ? seller.toObject() : seller;
+  return {
+    ...o,
+    user: {
+      _id: o._id,
+      id: o._id,
+      name: o.ownerName || o.name,
+      phone: o.phone,
+      email: o.email,
+      isVerified: o.isVerified,
+      createdAt: o.createdAt,
+    },
+  };
+}
+
+
+function accountRow(doc) {
+  return {
+    id: doc._id,
+    name: doc.role === 'seller' ? doc.ownerName || doc.name : doc.name,
+    phone: doc.phone,
+    email: doc.email,
+    role: doc.role,
+    isVerified: doc.isVerified, 
+    isBanned: !!doc.isBanned,
+    createdAt: doc.createdAt,
+    sellerProfile: doc.role === 'seller' ? doc : null,
+  };
+}
+
+
+async function findAccountById(id) {
+  return (
+    (await User.findById(id)) ||
+    (await Seller.findById(id)) ||
+    (await Admin.findById(id))
+  );
+}
+
+
 router.get('/dashboard', adminOnly, async (req, res) => {
   try {
     const now = new Date();
@@ -41,13 +83,13 @@ router.get('/dashboard', adminOnly, async (req, res) => {
     ] = await Promise.all([
       Order.find({ createdAt: { $gte: sevenDaysAgo } }).sort({ createdAt: -1 }),
       Order.find({ createdAt: { $gte: todayStart, $lt: todayEnd } }),
-      User.find({ role: { $ne: 'admin' } }).sort({ createdAt: -1 }),
-      Seller.find().populate('user', 'name phone isVerified'),
+      User.find().sort({ createdAt: -1 }), // buyers
+      Seller.find(),
       Product.find({ isActive: true }).select('name price category stock images owner'),
-      User.countDocuments({ createdAt: { $gte: todayStart, $lt: todayEnd }, role: { $ne: 'admin' } }),
+      User.countDocuments({ createdAt: { $gte: todayStart, $lt: todayEnd } }),
     ]);
 
-    // --- Revenue calculations ---
+ 
     let totalRevenue = 0;
     let todayRevenue = 0;
     const revenueByDay = {};
@@ -67,19 +109,19 @@ router.get('/dashboard', adminOnly, async (req, res) => {
       }
     }
 
-    // Aggregate all time total revenue
+   
     const allOrders = await Order.aggregate([
       { $group: { _id: null, total: { $sum: '$totalAmount' } } },
     ]);
     totalRevenue = allOrders[0]?.total || 0;
 
-    // --- Sellers stats ---
+
     const totalSellers = await Seller.countDocuments();
     const activeSellers = await Seller.countDocuments({
       updatedAt: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) },
     });
 
-    // --- Platform commission (assuming 15% platform fee) ---
+    
     const COMMISSION_RATE = 0.15;
     let platformCommission = 0;
     let todayCommission = 0;
@@ -92,7 +134,7 @@ router.get('/dashboard', adminOnly, async (req, res) => {
       }
     }
 
-    // --- Revenue trend (last 7 days) ---
+   
     const trend = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
@@ -103,7 +145,7 @@ router.get('/dashboard', adminOnly, async (req, res) => {
       });
     }
 
-    // --- Top sellers by revenue ---
+    
     const sellerRevenueMap = {};
     for (const order of orders) {
       for (const item of order.items) {
@@ -119,28 +161,27 @@ router.get('/dashboard', adminOnly, async (req, res) => {
       Object.entries(sellerRevenueMap)
         .sort(([, a], [, b]) => b - a)
         .slice(0, 5)
-        .map(async ([userId, revenue]) => {
-          const user = await User.findById(userId).select('name phone');
-          const seller = await Seller.findOne({ user: userId }).select('name');
+        .map(async ([sellerId, revenue]) => {
+          const seller = await Seller.findById(sellerId).select('name ownerName phone');
           return {
-            id: userId,
-            name: seller?.name || user?.name || 'Unknown',
-            phone: user?.phone || '',
+            id: sellerId,
+            name: seller?.name || seller?.ownerName || 'Unknown',
+            phone: seller?.phone || '',
             revenue: Math.round(revenue),
           };
         })
     );
 
-    // --- Recent orders ---
+ 
     const recentOrders = await Order.find()
       .populate('buyer', 'name phone')
       .sort({ createdAt: -1 })
       .limit(10);
 
-    // --- Today's order count ---
+
     const todayOrderCount = todayOrders.length;
 
-    // --- New customers (today) ---
+
     const newCustomersToday = todayUsers;
 
     res.json({
@@ -177,74 +218,67 @@ router.get('/dashboard', adminOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/users — all users (with optional role filter)
+
 router.get('/users', adminOnly, async (req, res) => {
   try {
     const { role, page = 1, limit = 50, search } = req.query;
+
+
+    let models;
+    if (role === 'seller') models = [Seller];
+    else if (role === 'admin') models = [Admin];
+    else if (role === 'buyer') models = [User];
+    else if (req.query.excludeAdmins === 'true') models = [User, Seller];
+    else models = [User, Seller, Admin];
+
     const query = {};
-    if (req.query.excludeAdmins === 'true' && !role) {
-      query.role = { $ne: 'admin' };
-    } else if (role) {
-      query.role = role;
-    }
     if (search) {
-      // Escape regex metacharacters so phone numbers (leading '+') etc. work.
+     
       const esc = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const re = new RegExp(esc, 'i');
-      query.$or = [{ name: re }, { phone: re }, { email: re }];
-      // Allow looking a user up by their exact Mongo _id too.
+  
+      query.$or = [{ name: re }, { phone: re }, { email: re }, { ownerName: re }];
+      
       if (mongoose.isValidObjectId(search)) query.$or.push({ _id: search });
     }
 
+
+    const groups = await Promise.all(
+      models.map((M) => {
+        const q = M === Seller ? { ...query, isVerified: true } : query;
+        return M.find(q).select('-password -otp -otpExpiry');
+      })
+    );
+    const merged = groups
+      .flat()
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const total = merged.length;
     const skip = (Number(page) - 1) * Number(limit);
-    const [users, total] = await Promise.all([
-      User.find(query)
-        .select('-password -otp -otpExpiry')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit)),
-      User.countDocuments(query),
-    ]);
+    const pageItems = merged.slice(skip, skip + Number(limit)).map(accountRow);
 
-    // Attach seller info for seller role
-    const userIds = users.filter((u) => u.role === 'seller').map((u) => u._id);
-    const sellers = await Seller.find({ user: { $in: userIds } });
-    const sellerMap = {};
-    sellers.forEach((s) => { sellerMap[s.user.toString()] = s; });
-
-    const enriched = users.map((u) => ({
-      id: u._id,
-      name: u.name,
-      phone: u.phone,
-      email: u.email,
-      role: u.role,
-      isVerified: u.isVerified,
-      createdAt: u.createdAt,
-      sellerProfile: u.role === 'seller' ? sellerMap[u._id.toString()] : null,
-    }));
-
-    res.json({ users: enriched, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
+    res.json({ users: pageItems, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// PATCH /api/admin/users/:id/toggle-ban
+
 router.patch('/users/:id/toggle-ban', adminOnly, async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
+    const account = await findAccountById(req.params.id);
+    if (!account) return res.status(404).json({ message: 'User not found' });
 
-    user.isVerified = !user.isVerified;
-    await user.save();
+    account.isBanned = !account.isBanned;
+    await account.save();
 
-    res.json({ user: { id: user._id, isVerified: user.isVerified } });
+    res.json({ user: { id: account._id, isBanned: account.isBanned } });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// GET /api/admin/products/categories — get all unique product categories
+
 router.get('/products/categories', adminOnly, async (req, res) => {
   try {
     const categories = await Product.distinct('category');
@@ -254,7 +288,7 @@ router.get('/products/categories', adminOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/products — all products (with optional category filter)
+
 router.get('/products', adminOnly, async (req, res) => {
   try {
     const { category, page = 1, limit = 50 } = req.query;
@@ -277,7 +311,7 @@ router.get('/products', adminOnly, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/products/:id
+
 router.delete('/products/:id', adminOnly, async (req, res) => {
   try {
     const product = await Product.findByIdAndDelete(req.params.id);
@@ -291,16 +325,14 @@ router.delete('/products/:id', adminOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/sellers/pending — sellers pending approval
+
 router.get('/sellers/pending', adminOnly, async (req, res) => {
   try {
-    const sellers = await Seller.find()
-      .populate('user', 'name phone email isVerified createdAt')
-      .sort({ createdAt: -1 });
+    const sellers = await Seller.find().sort({ createdAt: -1 });
 
-    // Sellers with pending verification (no bank details or incomplete profile)
-    const pending = sellers.filter((s) => !s.bank?.accountNumber || !s.name || !s.gstin);
-    const approved = sellers.filter((s) => s.bank?.accountNumber && s.name);
+
+    const pending = sellers.filter((s) => !s.isVerified).map(sellerView);
+    const approved = sellers.filter((s) => s.isVerified).map(sellerView);
 
     res.json({ pending, approved, total: sellers.length });
   } catch (err) {
@@ -308,16 +340,14 @@ router.get('/sellers/pending', adminOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/sellers/payouts — seller payout info
+
 router.get('/sellers/payouts', adminOnly, async (req, res) => {
   try {
-    const sellers = await Seller.find()
-      .populate('user', 'name phone')
-      .sort({ createdAt: -1 });
+    const sellers = await Seller.find().sort({ createdAt: -1 });
 
     const payoutData = await Promise.all(
       sellers.map(async (seller) => {
-        const products = await Product.find({ owner: seller.user._id }).distinct('_id');
+        const products = await Product.find({ owner: seller._id }).distinct('_id');
         const orders = await Order.find({ 'items.product': { $in: products } });
 
         let totalEarnings = 0;
@@ -337,9 +367,9 @@ router.get('/sellers/payouts', adminOnly, async (req, res) => {
 
         return {
           id: seller._id,
-          userId: seller.user?._id,
-          storeName: seller.name || seller.user?.name || 'Unknown',
-          phone: seller.user?.phone || '',
+          userId: seller._id,
+          storeName: seller.name || seller.ownerName || 'Unknown',
+          phone: seller.phone || '',
           bankAccount: seller.bank?.accountNumber ? `xxxx${seller.bank.accountNumber.slice(-4)}` : null,
           ifsc: seller.bank?.ifsc || null,
           totalEarnings: Math.round(totalEarnings),
@@ -356,13 +386,7 @@ router.get('/sellers/payouts', adminOnly, async (req, res) => {
   }
 });
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   MARKETING & COUPON MANAGEMENT
-   ═══════════════════════════════════════════════════════════════════════════ */
 
-// ── BANNERS ──────────────────────────────────────────────────────────────────
-
-// GET /api/admin/banners
 router.get('/banners', adminOnly, async (req, res) => {
   try {
     const banners = await Banner.find().sort({ order: 1, createdAt: -1 });
@@ -372,7 +396,7 @@ router.get('/banners', adminOnly, async (req, res) => {
   }
 });
 
-// POST /api/admin/banners — create banner with optional Cloudinary upload
+
 router.post('/banners', adminOnly, async (req, res) => {
   try {
     const { title, image, publicId, link, position, description, order } = req.body;
@@ -386,7 +410,7 @@ router.post('/banners', adminOnly, async (req, res) => {
   }
 });
 
-// PUT /api/admin/banners/:id
+
 router.put('/banners/:id', adminOnly, async (req, res) => {
   try {
     const banner = await Banner.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
@@ -397,7 +421,7 @@ router.put('/banners/:id', adminOnly, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/banners/:id — delete from Cloudinary too if publicId exists
+
 router.delete('/banners/:id', adminOnly, async (req, res) => {
   try {
     const banner = await Banner.findById(req.params.id);
@@ -414,7 +438,7 @@ router.delete('/banners/:id', adminOnly, async (req, res) => {
   }
 });
 
-// POST /api/admin/banners/upload — upload image to Cloudinary
+
 router.post('/banners/upload', adminOnly, async (req, res) => {
   try {
     const { image } = req.body;
@@ -428,9 +452,7 @@ router.post('/banners/upload', adminOnly, async (req, res) => {
   }
 });
 
-// ── COUPONS ──────────────────────────────────────────────────────────────────
 
-// GET /api/admin/coupons — all coupons (including inactive, expired)
 router.get('/coupons', adminOnly, async (req, res) => {
   try {
     const coupons = await Coupon.find()
@@ -442,7 +464,7 @@ router.get('/coupons', adminOnly, async (req, res) => {
   }
 });
 
-// POST /api/admin/coupons — create coupon
+
 router.post('/coupons', adminOnly, async (req, res) => {
   try {
     const { code, description, discountType, discountValue, minOrder, expiresAt, maxUses, targetUsers, targetSellers } = req.body;
@@ -467,7 +489,7 @@ router.post('/coupons', adminOnly, async (req, res) => {
   }
 });
 
-// PUT /api/admin/coupons/:id
+
 router.put('/coupons/:id', adminOnly, async (req, res) => {
   try {
     const { targetUsers, targetSellers, ...rest } = req.body;
@@ -482,7 +504,7 @@ router.put('/coupons/:id', adminOnly, async (req, res) => {
   }
 });
 
-// PATCH /api/admin/coupons/:id/toggle — toggle active/inactive
+
 router.patch('/coupons/:id/toggle', adminOnly, async (req, res) => {
   try {
     const coupon = await Coupon.findById(req.params.id);
@@ -495,7 +517,7 @@ router.patch('/coupons/:id/toggle', adminOnly, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/coupons/:id
+
 router.delete('/coupons/:id', adminOnly, async (req, res) => {
   try {
     const coupon = await Coupon.findByIdAndDelete(req.params.id);
@@ -506,9 +528,7 @@ router.delete('/coupons/:id', adminOnly, async (req, res) => {
   }
 });
 
-// ── BULK NOTIFICATIONS ──────────────────────────────────────────────────────
 
-// POST /api/admin/notifications/bulk — send notification to users or sellers
 router.post('/notifications/bulk', adminOnly, async (req, res) => {
   try {
     const { title, message, type, audience, targetUserIds, targetSellerIds } = req.body;
@@ -518,14 +538,14 @@ router.post('/notifications/bulk', adminOnly, async (req, res) => {
 
     let recipients = [];
     if (audience === 'all_users') {
-      recipients = (await User.find({ role: { $ne: 'admin' } }).select('_id')).map((u) => u._id);
+      recipients = (await User.find().select('_id')).map((u) => u._id);
     } else if (audience === 'all_sellers') {
-      recipients = (await User.find({ role: 'seller' }).select('_id')).map((u) => u._id);
+      recipients = (await Seller.find().select('_id')).map((s) => s._id);
     } else if (audience === 'specific_users' && targetUserIds && Array.isArray(targetUserIds) && targetUserIds.length > 0) {
       recipients = targetUserIds;
     } else if (audience === 'specific_sellers' && targetSellerIds && Array.isArray(targetSellerIds) && targetSellerIds.length > 0) {
-      const sellerUsers = await User.find({ _id: { $in: targetSellerIds }, role: 'seller' }).select('_id');
-      recipients = sellerUsers.map((u) => u._id);
+      const sellerDocs = await Seller.find({ _id: { $in: targetSellerIds } }).select('_id');
+      recipients = sellerDocs.map((s) => s._id);
     } else {
       return res.status(400).json({ message: 'Invalid audience selection or no specific recipients provided' });
     }
@@ -552,7 +572,7 @@ router.post('/notifications/bulk', adminOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/notifications/history — view sent notification history
+
 router.get('/notifications/history', adminOnly, async (req, res) => {
   try {
     const history = await Notification.aggregate([
@@ -567,7 +587,7 @@ router.get('/notifications/history', adminOnly, async (req, res) => {
 });
 
 
-// ── ADMIN NOTIFICATIONS ─────────────────────────────────────────────────────
+
 
 router.get('/admin-notifications', adminOnly, async (req, res) => {
   try {
@@ -592,16 +612,11 @@ router.patch('/admin-notifications/:id/read', adminOnly, async (req, res) => {
   }
 });
 
-// ── SELLER APPROVAL ─────────────────────────────────────────────────────────
 
-
-// GET /api/admin/sellers — all sellers
 router.get('/sellers', adminOnly, async (req, res) => {
   try {
-    const sellers = await Seller.find()
-      .populate('user', 'name phone email isVerified createdAt')
-      .sort({ createdAt: -1 });
-    res.json({ sellers });
+    const sellers = await Seller.find().sort({ createdAt: -1 });
+    res.json({ sellers: sellers.map(sellerView) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -610,15 +625,15 @@ router.get('/sellers', adminOnly, async (req, res) => {
 
 router.patch('/sellers/:id/approve', adminOnly, async (req, res) => {
   try {
-    const seller = await Seller.findById(req.params.id).populate('user');
+    const seller = await Seller.findById(req.params.id);
     if (!seller) return res.status(404).json({ message: 'Seller not found' });
 
-    seller.user.isVerified = true;
-    await seller.user.save();
+    seller.isVerified = true;
+    await seller.save();
 
-    await notifyAdmin('new_seller', 'Seller approved', `${seller.name || seller.user?.name || 'a seller'} has been approved.`, { sellerId: seller._id });
+    await notifyAdmin('new_seller', 'Seller approved', `${seller.name || seller.ownerName || 'a seller'} has been approved.`, { sellerId: seller._id });
 
-    res.json({ success: true, seller: { ...seller.toObject(), user: { id: seller.user._id, isVerified: true } } });
+    res.json({ success: true, seller: sellerView(seller) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -627,13 +642,12 @@ router.patch('/sellers/:id/approve', adminOnly, async (req, res) => {
 
 router.patch('/sellers/:id/reject', adminOnly, async (req, res) => {
   try {
-    const seller = await Seller.findById(req.params.id).populate('user');
+    const seller = await Seller.findById(req.params.id);
     if (!seller) return res.status(404).json({ message: 'Seller not found' });
 
-    
     await Seller.findByIdAndDelete(seller._id);
 
-    await notifyAdmin('new_seller', 'Seller rejected', `${seller.name || seller.user?.name || 'a seller'} has been rejected.`, { sellerId: seller._id });
+    await notifyAdmin('new_seller', 'Seller rejected', `${seller.name || seller.ownerName || 'a seller'} has been rejected.`, { sellerId: seller._id });
 
     res.json({ success: true, message: 'Seller rejected and removed' });
   } catch (err) {

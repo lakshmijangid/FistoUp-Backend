@@ -1,7 +1,7 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const User = require('../models/User');
+const Admin = require('../models/Admin');
+const { normalizePhone } = require('../utils/phone');
 
 const MONGO_URI = process.env.MONGODB_URI;
 
@@ -20,25 +20,23 @@ async function createAdmin() {
 
     const name = nameArg || process.env.ADMIN_NAME || 'FistoUp Admin';
     const email = emailArg || process.env.ADMIN_EMAIL || 'admin@fistoup.com';
-    const phone = phoneArg || process.env.ADMIN_PHONE || '9999999999';
+    const phone = normalizePhone(phoneArg || process.env.ADMIN_PHONE || '9999999999');
     const password = passwordArg || process.env.ADMIN_PASSWORD || 'Admin@12345';
 
     // Check if admin already exists
-    const existing = await User.findOne({ phone, role: 'admin' });
+    const existing = await Admin.findOne({ phone });
     if (existing) {
       console.log(`⚠️  Admin with phone ${phone} already exists (id: ${existing._id})`);
       await mongoose.disconnect();
       process.exit(0);
     }
 
-    // Create admin user
-    const admin = await User.create({
+    // Create admin (in the `admins` collection)
+    const admin = await Admin.create({
       name,
       phone,
       email,
       password, // Will be hashed by the pre-save hook
-      role: 'admin',
-      isVerified: true,
     });
 
     console.log('\n✅ Admin user created successfully!');

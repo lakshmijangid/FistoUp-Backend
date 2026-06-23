@@ -2,7 +2,7 @@ const router = require('express').Router();
 const Coupon = require('../models/Coupon');
 const { protect, requireRole } = require('../middleware/auth');
 
-// GET /api/coupons  — active, non-expired coupons available to buyers
+
 router.get('/', async (req, res) => {
   try {
     const now = new Date();
@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /api/coupons/validate  { code, subtotal }  — check + compute discount
+
 router.post('/validate', protect, async (req, res) => {
   try {
     const { code, subtotal = 0 } = req.body;
@@ -34,7 +34,7 @@ router.post('/validate', protect, async (req, res) => {
     let discount = 0;
     if (coupon.discountType === 'percent') discount = (subtotal * coupon.discountValue) / 100;
     else if (coupon.discountType === 'flat') discount = coupon.discountValue;
-    // 'shipping' coupons are applied as free delivery by the order route.
+   
     discount = Math.min(Math.round(discount), subtotal);
 
     res.json({ valid: true, coupon, discount });
@@ -43,7 +43,7 @@ router.post('/validate', protect, async (req, res) => {
   }
 });
 
-// POST /api/coupons  — admin creates a coupon
+
 router.post('/', protect, requireRole('admin'), async (req, res) => {
   try {
     const coupon = await Coupon.create(req.body);

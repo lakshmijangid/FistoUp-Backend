@@ -8,7 +8,7 @@ const { protect, requireRole } = require('../middleware/auth');
 const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
 const ADMIN_WHATSAPP = 'whatsapp:+916350557300';
 
-// POST /api/bulk/inquiry
+
 router.post('/inquiry', async (req, res) => {
   try {
     const { businessName, contactPerson, phone, productNeeded, quantity, city, message } = req.body;
@@ -52,7 +52,7 @@ router.post('/inquiry', async (req, res) => {
   }
 });
 
-// GET /api/bulk/products  — list products that have bulk pricing
+
 router.get('/products', async (req, res) => {
   try {
     const { category, page = 1, limit = 20 } = req.query;
@@ -73,7 +73,7 @@ router.get('/products', async (req, res) => {
   }
 });
 
-// GET /api/bulk/quote  — calculate bulk order total before placing
+
 router.post('/quote', protect, async (req, res) => {
   try {
     const { items } = req.body;
@@ -107,7 +107,7 @@ router.post('/quote', protect, async (req, res) => {
   }
 });
 
-// GET /api/bulk/orders  — admin sees all bulk orders
+
 router.get('/orders', protect, requireRole('admin'), async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -126,7 +126,7 @@ router.get('/orders', protect, requireRole('admin'), async (req, res) => {
   }
 });
 
-// POST /api/bulk/orders  — place a bulk order directly (reuses orders logic, flagged as bulk)
+
 router.post('/orders', protect, async (req, res) => {
   try {
     const { items, deliveryAddress, notes } = req.body;

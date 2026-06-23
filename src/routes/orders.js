@@ -7,8 +7,7 @@ const Deal = require('../models/Deal');
 const AdminNotification = require('../models/AdminNotification');
 const { protect } = require('../middleware/auth');
 
-// The price to charge for a product: an active deal price visible to this buyer,
-// else the catalogue price.
+
 async function effectivePrice(product, buyerId) {
   const now = new Date();
   const deal = await Deal.findOne({

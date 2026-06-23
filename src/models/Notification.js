@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-// A per-user in-app notification (order updates, payments, offers, info).
+
 const notificationSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
