@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Seller = require('../models/Seller');
 const Admin = require('../models/Admin');
 const Product = require('../models/Product');
+const Category = require('../models/Category');
 const Banner = require('../models/Banner');
 const Coupon = require('../models/Coupon');
 const Notification = require('../models/Notification');
@@ -145,32 +146,46 @@ router.get('/dashboard', adminOnly, async (req, res) => {
       });
     }
 
-    
-    const sellerRevenueMap = {};
-    for (const order of orders) {
-      for (const item of order.items) {
-        const product = await Product.findById(item.product).select('owner name');
-        if (product && product.owner) {
-          const ownerId = product.owner.toString();
-          sellerRevenueMap[ownerId] = (sellerRevenueMap[ownerId] || 0) + item.price * item.quantity;
-        }
-      }
-    }
+    // Use aggregation to get seller revenue without N+1 queries
+    const sellerRevenueAgg = await Order.aggregate([
+      { $match: { createdAt: { $gte: sevenDaysAgo } } },
+      { $unwind: '$items' },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'items.product',
+          foreignField: '_id',
+          as: 'product',
+        },
+      },
+      { $unwind: '$product' },
+      {
+        $group: {
+          _id: '$product.owner',
+          revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+        },
+      },
+      { $sort: { revenue: -1 } },
+      { $limit: 5 },
+    ]);
 
-    const topSellers = await Promise.all(
-      Object.entries(sellerRevenueMap)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 5)
-        .map(async ([sellerId, revenue]) => {
-          const seller = await Seller.findById(sellerId).select('name ownerName phone');
-          return {
-            id: sellerId,
-            name: seller?.name || seller?.ownerName || 'Unknown',
-            phone: seller?.phone || '',
-            revenue: Math.round(revenue),
-          };
-        })
-    );
+    // Fetch seller details for top sellers
+    const topSellerIds = sellerRevenueAgg.map((s) => s._id);
+    const topSellerDocs = await Seller.find({ _id: { $in: topSellerIds } }).select('name ownerName phone');
+    const sellerMap = {};
+    topSellerDocs.forEach((s) => {
+      sellerMap[s._id.toString()] = s;
+    });
+
+    const topSellers = sellerRevenueAgg.map((item) => {
+      const seller = sellerMap[item._id?.toString()];
+      return {
+        id: item._id,
+        name: seller?.name || seller?.ownerName || 'Unknown',
+        phone: seller?.phone || '',
+        revenue: Math.round(item.revenue),
+      };
+    });
 
  
     const recentOrders = await Order.find()
@@ -288,6 +303,41 @@ router.get('/products/categories', adminOnly, async (req, res) => {
   }
 });
 
+// POST /api/admin/categories/upload — upload a category image to Cloudinary
+router.post('/categories/upload', adminOnly, async (req, res) => {
+  try {
+    const { image } = req.body;
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ message: 'image (data URL) is required' });
+    }
+    const result = await cloudinary.uploader.upload(image, { folder: 'fisto/categories' });
+    res.status(201).json({ url: result.secure_url, publicId: result.public_id });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Upload failed' });
+  }
+});
+
+// PUT /api/admin/categories — upsert a category's image/colour (name matched lowercase)
+router.put('/categories', adminOnly, async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim().toLowerCase();
+    if (!name) return res.status(400).json({ message: 'name is required' });
+    const { image, publicId, color } = req.body;
+    const update = {};
+    if (image !== undefined) update.image = image;
+    if (publicId !== undefined) update.publicId = publicId;
+    if (color !== undefined) update.color = color;
+    const category = await Category.findOneAndUpdate(
+      { name },
+      { $set: update, $setOnInsert: { name } },
+      { new: true, upsert: true, runValidators: true }
+    );
+    res.json({ category });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 
 router.get('/products', adminOnly, async (req, res) => {
   try {
@@ -298,7 +348,7 @@ router.get('/products', adminOnly, async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
     const [products, total] = await Promise.all([
       Product.find(query)
-        .populate('owner', 'name phone')
+        .populate('owner', 'name ownerName phone')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit)),
@@ -343,44 +393,66 @@ router.get('/sellers/pending', adminOnly, async (req, res) => {
 
 router.get('/sellers/payouts', adminOnly, async (req, res) => {
   try {
-    const sellers = await Seller.find().sort({ createdAt: -1 });
+    // Use aggregation to calculate seller payouts without N+1 queries
+    const payoutData = await Order.aggregate([
+      { $unwind: '$items' },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'items.product',
+          foreignField: '_id',
+          as: 'product',
+        },
+      },
+      { $unwind: '$product' },
+      {
+        $group: {
+          _id: '$product.owner',
+          totalEarnings: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+          pendingPayout: {
+            $sum: {
+              $cond: [{ $eq: ['$paymentStatus', 'paid'] }, { $multiply: ['$items.price', '$items.quantity'] }, 0],
+            },
+          },
+          orderCount: { $addToSet: '$_id' },
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          totalEarnings: 1,
+          pendingPayout: 1,
+          orderCount: { $size: '$orderCount' },
+        },
+      },
+      { $sort: { totalEarnings: -1 } },
+    ]);
 
-    const payoutData = await Promise.all(
-      sellers.map(async (seller) => {
-        const products = await Product.find({ owner: seller._id }).distinct('_id');
-        const orders = await Order.find({ 'items.product': { $in: products } });
+    // Fetch seller details
+    const sellerIds = payoutData.map((p) => p._id);
+    const sellers = await Seller.find({ _id: { $in: sellerIds } }).sort({ createdAt: -1 });
+    const sellerMap = {};
+    sellers.forEach((s) => {
+      sellerMap[s._id.toString()] = s;
+    });
 
-        let totalEarnings = 0;
-        let pendingPayout = 0;
+    const result = payoutData.map((item) => {
+      const seller = sellerMap[item._id?.toString()];
+      return {
+        id: item._id,
+        userId: item._id,
+        storeName: seller?.name || seller?.ownerName || 'Unknown',
+        phone: seller?.phone || '',
+        bankAccount: seller?.bank?.accountNumber ? `xxxx${seller.bank.accountNumber.slice(-4)}` : null,
+        ifsc: seller?.bank?.ifsc || null,
+        totalEarnings: Math.round(item.totalEarnings),
+        pendingPayout: Math.round(item.pendingPayout),
+        paidPayout: Math.round(item.totalEarnings - item.pendingPayout),
+        orderCount: item.orderCount,
+      };
+    });
 
-        for (const order of orders) {
-          for (const item of order.items) {
-            if (products.some((p) => p.toString() === (item.product?._id || item.product)?.toString())) {
-              const lineTotal = item.price * item.quantity;
-              totalEarnings += lineTotal;
-              if (order.paymentStatus === 'paid') {
-                pendingPayout += lineTotal;
-              }
-            }
-          }
-        }
-
-        return {
-          id: seller._id,
-          userId: seller._id,
-          storeName: seller.name || seller.ownerName || 'Unknown',
-          phone: seller.phone || '',
-          bankAccount: seller.bank?.accountNumber ? `xxxx${seller.bank.accountNumber.slice(-4)}` : null,
-          ifsc: seller.bank?.ifsc || null,
-          totalEarnings: Math.round(totalEarnings),
-          pendingPayout: Math.round(pendingPayout),
-          paidPayout: Math.round(totalEarnings - pendingPayout),
-          orderCount: orders.length,
-        };
-      })
-    );
-
-    res.json({ sellers: payoutData });
+    res.json({ sellers: result });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -556,6 +628,7 @@ router.post('/notifications/bulk', adminOnly, async (req, res) => {
       title,
       message,
       read: false,
+      audience,
     }));
 
     if (notifications.length > 0) {
@@ -575,11 +648,22 @@ router.post('/notifications/bulk', adminOnly, async (req, res) => {
 
 router.get('/notifications/history', adminOnly, async (req, res) => {
   try {
-    const history = await Notification.aggregate([
-      { $group: { _id: { title: '$title', message: '$message', type: '$type' }, count: { $sum: 1 }, createdAt: { $first: '$createdAt' } } },
+    const { from, to, audience } = req.query;
+    const match = {};
+    if (from || to) {
+      match.createdAt = {};
+      if (from) match.createdAt.$gte = new Date(from);
+      if (to) match.createdAt.$lte = new Date(to);
+    }
+    if (audience) match.audience = audience;
+    const pipeline = [];
+    if (Object.keys(match).length) pipeline.push({ $match: match });
+    pipeline.push(
+      { $group: { _id: { title: '$title', message: '$message', type: '$type', audience: '$audience' }, count: { $sum: 1 }, createdAt: { $first: '$createdAt' } } },
       { $sort: { createdAt: -1 } },
-      { $limit: 50 },
-    ]);
+      { $limit: 100 },
+    );
+    const history = await Notification.aggregate(pipeline);
     res.json({ history: history.map((h) => ({ ...h._id, count: h.count, createdAt: h.createdAt })) });
   } catch (err) {
     res.status(500).json({ message: err.message });

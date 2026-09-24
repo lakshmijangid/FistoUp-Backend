@@ -108,11 +108,16 @@ router.post('/send-otp', async (req, res) => {
     }
 
 
-    const devMode = !delivered || process.env.NODE_ENV !== 'production';
+    const isProd = process.env.NODE_ENV === 'production';
+    if (isProd && !delivered) {
+      return res.status(502).json({ message: 'Could not send OTP. Please try again.' });
+    }
+
     res.json({
       success: true,
       message: delivered ? 'OTP sent' : 'OTP generated (dev mode)',
-      ...(devMode ? { devOtp: otp } : {}),
+      // Dev OTP only returned in non-production environments
+      ...(!isProd ? { devOtp: otp } : {}),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -283,7 +288,8 @@ router.post('/send-email-otp', protect, async (req, res) => {
     res.json({
       success: true,
       message: delivered ? 'Verification code sent' : 'Code generated (dev mode)',
-      ...(isProd ? {} : { devCode: code }),
+      // Dev code only returned in non-production environments
+      ...(!isProd ? { devCode: code } : {}),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });

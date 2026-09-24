@@ -1,8 +1,19 @@
 const mongoose = require('mongoose');
 
+// Counter schema for atomic order number generation
+const counterSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  seq: { type: Number, default: 0 },
+});
+const Counter = mongoose.model('Counter', counterSchema);
+
 async function generateOrderNumber() {
-  const count = await mongoose.model('Order').countDocuments();
-  return String((count + 1) % 1000000).padStart(6, '0');
+  const counter = await Counter.findOneAndUpdate(
+    { _id: 'orderNumber' },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+  return String(counter.seq % 1000000).padStart(6, '0');
 }
 
 const orderItemSchema = new mongoose.Schema(
@@ -17,7 +28,7 @@ const orderItemSchema = new mongoose.Schema(
 const orderSchema = new mongoose.Schema(
   {
     orderNumber: { type: String, unique: true },
-    buyer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    buyer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     items: [orderItemSchema],
     totalAmount: { type: Number, required: true },
     shippingCharge: { type: Number, default: 0 },
@@ -40,6 +51,10 @@ const orderSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Compound indexes for common query patterns
+orderSchema.index({ status: 1, createdAt: -1 });
+orderSchema.index({ 'items.product': 1 });
 
 orderSchema.pre('save', async function (next) {
   if (!this.orderNumber) {

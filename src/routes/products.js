@@ -2,6 +2,7 @@ const router = require('express').Router();
 const jwt = require('jsonwebtoken');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
+const Category = require('../models/Category');
 const Deal = require('../models/Deal');
 const Sale = require('../models/Sale');
 const { protect, requireRole } = require('../middleware/auth');
@@ -85,7 +86,19 @@ router.get('/categories', async (req, res) => {
       { $group: { _id: '$category', count: { $sum: 1 } } },
       { $sort: { _id: 1 } },
     ]);
-    const categories = counts.map((c) => ({ name: c._id, count: c.count }));
+    // Attach the admin-set image/colour (matched on lowercase name).
+    const metas = await Category.find({});
+    const metaByName = {};
+    metas.forEach((m) => { metaByName[m.name] = m; });
+    const categories = counts.map((c) => {
+      const meta = metaByName[String(c._id).toLowerCase()];
+      return {
+        name: c._id,
+        count: c.count,
+        image: meta?.image || '',
+        color: meta?.color || '',
+      };
+    });
     res.json({ categories });
   } catch (err) {
     res.status(500).json({ message: err.message });

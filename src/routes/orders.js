@@ -47,6 +47,7 @@ router.post('/create', protect, async (req, res) => {
     let subtotal = 0;
     const resolvedItems = [];
 
+    // First pass: validate stock and get prices
     for (const item of items) {
       const product = await Product.findById(item.product);
       if (!product || !product.isActive) {
@@ -64,8 +65,22 @@ router.post('/create', protect, async (req, res) => {
     const shippingCharge = subtotal >= SHIPPING_THRESHOLD ? 0 : SHIPPING_FEE;
     const totalAmount = parseFloat((subtotal + tax + shippingCharge).toFixed(2));
 
+    // Atomically decrement stock with quantity check to prevent race conditions
+    const stockUpdates = [];
     for (const item of resolvedItems) {
-      await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.quantity } });
+      const result = await Product.findOneAndUpdate(
+        { _id: item.product, stock: { $gte: item.quantity } },
+        { $inc: { stock: -item.quantity } },
+        { new: true }
+      );
+      if (!result) {
+        // Rollback any previous stock decrements
+        for (const update of stockUpdates) {
+          await Product.findByIdAndUpdate(update._id, { $inc: { stock: update.quantity } });
+        }
+        return res.status(400).json({ message: `Insufficient stock for product ${item.product}` });
+      }
+      stockUpdates.push({ _id: item.product, quantity: item.quantity });
     }
 
     const order = await Order.create({

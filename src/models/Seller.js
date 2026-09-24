@@ -20,6 +20,7 @@ const sellerSchema = new mongoose.Schema(
       accountName: String,
       accountNumber: String,
       ifsc: String,
+      bankName: String,
       accountType: { type: String, enum: ['savings', 'current'] },
     },
     ...identityFields(),
