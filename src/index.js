@@ -14,16 +14,39 @@ app.use(helmet());
 
 // CORS - restrict to allowed origins
 const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
   : ['http://localhost:3004', 'http://localhost:3006', 'http://localhost:5173'];
+
+const PRIVATE_IP_PATTERNS = [
+  /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/,
+  /^192\.168\.\d{1,3}\.\d{1,3}$/,
+  /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/,
+];
+
+const isDevOrigin = (origin) => {
+  try {
+    const { protocol, hostname } = new URL(origin);
+    if (protocol !== 'http:' && protocol !== 'https:') return false;
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0') {
+      return true;
+    }
+    if (hostname.endsWith('.local')) return true;
+    return PRIVATE_IP_PATTERNS.some((p) => p.test(hostname));
+  } catch {
+    return false;
+  }
+};
 
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+      return callback(null, true);
     }
+    if (process.env.NODE_ENV !== 'production' && isDevOrigin(origin)) {
+      return callback(null, true);
+    }
+    console.warn(`[CORS] blocked origin: ${origin}`);
+    return callback(null, false);
   },
   credentials: true,
 }));
